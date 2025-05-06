@@ -78,8 +78,9 @@ namespace PowerPosition
             IEnumerable<PowerTrade> powerTrade = _powerService.GetTrades(localDate);
             
             var powerTradeValues = powerTrade.SelectMany(
-                powerTrade => powerTrade.Periods,
-                (trade, period) => new { period.Period, period.Volume }).OrderBy(a => a.Period); ;
+                    trade => trade.Periods,
+                    (trade, period) => new { period.Period, period.Volume }
+                ).OrderBy(a => a.Period);
 
             var aggregatedTrades = powerTradeValues
                 .GroupBy(powerTrade => powerTrade.Period)
