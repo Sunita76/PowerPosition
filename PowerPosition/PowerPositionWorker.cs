@@ -9,8 +9,9 @@ namespace PowerPosition
         private readonly string _folderPath;
         private readonly ILogger<PowerPositionWorker> _logger; 
         private readonly short _extractInterval;
+        private IPowerService _powerService;
         
-        public PowerPositionWorker(IConfiguration configuration, ILogger<PowerPositionWorker> logger)
+        public PowerPositionWorker(IConfiguration configuration, ILogger<PowerPositionWorker> logger, IPowerService powerService)
         {
             _configuration = configuration;
             var configuredPath = _configuration["CsvFolderPath"] ?? "data";
@@ -18,6 +19,7 @@ namespace PowerPosition
             Directory.CreateDirectory(_folderPath);
             _extractInterval = short.TryParse(_configuration["ExtractInterval"], out var interval) ? interval : (short)10;
             _logger = logger;
+            _powerService = powerService;
         }
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
@@ -51,6 +53,13 @@ namespace PowerPosition
             }
 
         }
+        private static DateTime GetCurrentLocalTime()
+        {
+            //Local time is in the Europe/London (Dublin, Edinburgh, Lisbon, London in Microsoft Windows) time zone. 
+
+            var localTimeZone = TimeZoneInfo.FindSystemTimeZoneById("GMT Standard Time");
+            return TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, localTimeZone);
+        }
         private static string[] GetPeriodToTimeMap(DateTime localDateTime)
         {
             string[] periodToTimeMap = new string[24];
@@ -60,59 +69,66 @@ namespace PowerPosition
                      .Select(i => periodStart.AddHours(i).ToString("HH:mm"))
                      .ToArray();
         }
-        
+
+
+        private IEnumerable<PowerPositionRecord> AggregateTrades(DateTime localDate)
+        {
+            var timeMap = GetPeriodToTimeMap(localDate);
+
+            IEnumerable<PowerTrade> powerTrade = _powerService.GetTrades(localDate);
+            
+            var powerTradeValues = powerTrade.SelectMany(
+                powerTrade => powerTrade.Periods,
+                (trade, period) => new { period.Period, period.Volume }).OrderBy(a => a.Period); ;
+
+            var aggregatedTrades = powerTradeValues
+                .GroupBy(powerTrade => powerTrade.Period)
+                .Select(g => new
+                {
+                    Period = g.Key,
+                    PeriodInHrs = (g.Key >= 1 && g.Key <= 24)
+                           ? timeMap[g.Key - 1]
+                           : "Unknown Time",
+                    VolumeTotal = Math.Round(g.Sum(pT => pT.Volume), 3),
+
+                })
+                .OrderBy(a => a.Period);
+            return aggregatedTrades.Select(p => new PowerPositionRecord
+            {
+                LocalTime = p.PeriodInHrs,
+                Volume = p.VolumeTotal
+            });
+
+        }
         public void WritePowerPositionToCsv(string folderPath)
         {
-               //Local time is in the Europe/London (Dublin, Edinburgh, Lisbon, London in Microsoft Windows) time zone. 
-                TimeZoneInfo localTimeZone = TimeZoneInfo.FindSystemTimeZoneById("GMT Standard Time"); 
-                DateTime localDateNow = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, localTimeZone);
-          
-                string[] periodToTimeMap = GetPeriodToTimeMap(localDateNow); //Mapping period to time
-                string csvFileName = $"PowerPosition_{localDateNow:yyyyMMdd_HHmm}.csv";
-                string filePath = Path.Combine(folderPath, csvFileName);
-                try
+            DateTime localDateNow = GetCurrentLocalTime();
+            
+            string csvFileName = $"PowerPosition_{localDateNow:yyyyMMdd_HHmm}.csv";
+            string filePath = Path.Combine(folderPath, csvFileName);
+            try
+            {
+                _logger.LogInformation("Starting power position CSV generation : {FileName}", csvFileName);
+                IEnumerable<PowerPositionRecord> powerPositions = AggregateTrades(localDateNow);
+                using var writer = new StreamWriter(filePath);
+                using (var csvWriter = new CsvWriter(writer, CultureInfo.InvariantCulture))
                 {
-                    _logger.LogInformation("Starting power position CSV generation : {FileName}", csvFileName);
-                    PowerService powerService = new PowerService();
-                    IEnumerable<PowerTrade> powerTrade = powerService.GetTrades(localDateNow.Date);
-                    
-                    var powerTradeValues = powerTrade.SelectMany(
-                        powerTrade => powerTrade.Periods,
-                        (trade, period) => new { period.Period, period.Volume }).OrderBy(a => a.Period); ;
-
-                    var aggregatedTrades = powerTradeValues
-                        .GroupBy(powerTrade => powerTrade.Period)
-                        .Select(g => new 
-                        {
-                            Period = g.Key,
-                            PeriodInHrs = (g.Key >= 1 && g.Key <= 24)
-                                   ? periodToTimeMap[g.Key - 1]
-                                   : "Unknown Time",
-                            VolumeTotal = Math.Round(g.Sum(pT => pT.Volume), 3),
-                           
-                        })
-                        .OrderBy(a => a.Period);
-                    var csvRecords = aggregatedTrades.Select(p => new
-                    {
-                        LocalTime = p.PeriodInHrs,
-                        Volume = p.VolumeTotal
-                    });
-  
-                    using var writer = new StreamWriter(filePath);
-                    using (var csvWriter = new CsvWriter(writer, CultureInfo.InvariantCulture))
-                    {
-                        csvWriter.WriteRecords(csvRecords);
-                    }
-                    _logger.LogInformation("Power position file written successfully: {FileName}", csvFileName);
-
+                    csvWriter.WriteRecords(powerPositions);
                 }
-                catch (Exception ex)
+                _logger.LogInformation("Power position file written successfully: {FileName}", csvFileName);
 
-                {
-                    _logger.LogError(ex, "An error occurred while writing the power position CSV file at {FileName}", csvFileName);
-                }
+            }
+            catch (Exception ex)
+
+            {
+                _logger.LogError(ex, "An error occurred while writing the power position CSV file at {FileName}", csvFileName);
+            }
         }
     }
-   
-   
+    public class PowerPositionRecord
+    {
+        public string LocalTime { get; set; }
+        public double Volume { get; set; }
+    }
+
 }
