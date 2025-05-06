@@ -1,5 +1,6 @@
 using PowerPosition;
 using Serilog;
+using Axpo;
 
 var logFolder = Path.Combine(Directory.GetCurrentDirectory(), "Logs");
 Log.Logger = new LoggerConfiguration()
@@ -23,6 +24,7 @@ try
         .ConfigureServices((context, services) =>
         {            
             services.AddHostedService<PowerPositionWorker>();
+            services.AddSingleton<IPowerService, PowerService>();
         })
         .UseSerilog()
         .Build()
